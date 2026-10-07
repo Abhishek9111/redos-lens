@@ -410,7 +410,7 @@ class Context {
             spans: [span],
             prefix,
             pump: w,
-          }, 10),
+          }),
         ];
       }
 
@@ -430,7 +430,7 @@ class Context {
             spans: [span, ...hits.map((a) => ({ start: a.start, end: a.end }))],
             prefix,
             pump: w,
-          }, 10),
+          }),
         ];
       }
     }
@@ -483,14 +483,15 @@ class Context {
       spans: loops.map((q) => ({ start: q.start, end: q.end })),
       prefix: this.prefixFor(loops[0]),
       pump: best.c,
-    }, 40);
+    });
   }
 
   private finish(
     f: Omit<Finding, "suffix" | "exploitable">,
-    n: number,
   ): Finding {
-    const suffix = this.failingSuffix(f.prefix, f.pump, n);
+    // Keep n tiny: this runs on the main thread against a pattern we already
+    // suspect is catastrophic. Whether a suffix forces failure rarely depends on n.
+    const suffix = this.failingSuffix(f.prefix, f.pump, 4);
     return { ...f, suffix: suffix ?? "", exploitable: suffix !== null };
   }
 }
