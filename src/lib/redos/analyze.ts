@@ -94,9 +94,14 @@ export function analyze(source: string, flags: string): Analysis {
   const findings: Finding[] = [];
 
   for (const q of ctx.loops) findings.push(...ctx.checkExponential(q));
+  const expSpans = findings.flatMap((f) => f.spans.slice(0, 1));
   for (const alt of ctx.alternatives) {
     const f = ctx.checkPolynomial(alt);
-    if (f) findings.push(f);
+    // Skip polynomial findings that are just a symptom of an exponential loop.
+    const covered = f?.spans.every((s) =>
+      expSpans.some((e) => e.start <= s.start && s.end <= e.end),
+    );
+    if (f && !covered) findings.push(f);
   }
 
   if (ctx.hasBackref) {
