@@ -59,7 +59,7 @@ export function FindingCard({
       ? { label: "Exponential", color: "var(--critical)", icon: "▲" }
       : { label: `Polynomial · O(n${sup(f.degree ?? 2)})`, color: "var(--serious)", icon: "◆" };
 
-  const growth = describeGrowth(f, samples);
+  const growth = describeGrowth(f, samples, running);
 
   return (
     <article
@@ -121,7 +121,14 @@ export function FindingCard({
       {samples.length > 0 && (
         <div className="mt-4">
           <TimingChart samples={samples} />
-          {growth && <p className="mt-2 text-sm text-ink-2">{growth}</p>}
+          {growth && (
+            <p className="mt-2 flex gap-2 text-sm text-ink-2">
+              <span aria-hidden style={{ color: growth.confirmed ? "var(--critical)" : "var(--text-3)" }}>
+                {growth.confirmed ? "▲" : "○"}
+              </span>
+              <span>{growth.text}</span>
+            </p>
+          )}
         </div>
       )}
     </article>

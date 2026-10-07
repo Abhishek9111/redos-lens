@@ -134,31 +134,52 @@ export function runTiming(
   return finish;
 }
 
-/** Fit the measured growth and summarise it in words. */
-export function describeGrowth(f: Finding, samples: Sample[]): string | null {
+export interface Growth {
+  confirmed: boolean;
+  text: string;
+}
+
+const NOT_REPRODUCED =
+  "This browser's regex engine handled it without blowing up. It optimizes some patterns that are still vulnerable in other backtracking engines (older V8 / Node, PCRE, Java, Python), so the static finding stands for those.";
+
+/** Fit the measured growth and summarise it in words. Null while there's too little data. */
+export function describeGrowth(f: Finding, samples: Sample[], running: boolean): Growth | null {
   const killed = samples.find((s) => s.killed);
   const usable = samples.filter((s) => !s.killed && s.ms >= 1);
+
   if (usable.length < 2) {
-    if (killed) return `A ${killed.length}-character input ran past ${KILL_MS / 1000}s and was killed.`;
-    return null;
+    if (killed)
+      return {
+        confirmed: true,
+        text: `Confirmed: a ${killed.length.toLocaleString()}-character input ran past ${KILL_MS / 1000}s and was killed.`,
+      };
+    return running ? null : { confirmed: false, text: NOT_REPRODUCED };
   }
   const a = usable[usable.length - 2];
   const b = usable[usable.length - 1];
 
   if (f.severity === "exponential") {
     const perPump = Math.pow(b.ms / a.ms, 1 / (b.n - a.n));
+    if (perPump < 1.15) return running ? null : { confirmed: false, text: NOT_REPRODUCED };
     const toTen = b.n + Math.log(10_000 / b.ms) / Math.log(perPump);
     const chars = Math.ceil(f.prefix.length + toTen * f.pump.length + f.suffix.length);
-    return `Each extra ${JSON.stringify(f.pump)} multiplies the time by about ×${perPump.toFixed(
-      2,
-    )}. Around ${chars} characters would block the thread for 10 s.`;
+    return {
+      confirmed: true,
+      text: `Confirmed: each extra ${JSON.stringify(f.pump)} multiplies the time by about ×${perPump.toFixed(
+        2,
+      )}. Around ${chars} characters would block the thread for 10 s.`,
+    };
   }
 
   const k = Math.log(b.ms / a.ms) / Math.log(b.length / a.length);
+  if (k < 1.4) return running ? null : { confirmed: false, text: NOT_REPRODUCED };
   const at = (len: number) => b.ms * Math.pow(len / b.length, k);
-  return `Measured growth is about O(n^${k.toFixed(1)}). Extrapolated: a 100 KB input takes ~${fmtMs(
-    at(100_000),
-  )} and 1 MB takes ~${fmtMs(at(1_000_000))}.`;
+  return {
+    confirmed: true,
+    text: `Confirmed: measured growth is about O(n^${k.toFixed(1)}). Extrapolated, a 100 KB input takes ~${fmtMs(
+      at(100_000),
+    )} and 1 MB takes ~${fmtMs(at(1_000_000))}.`,
+  };
 }
 
 export function fmtMs(ms: number): string {
