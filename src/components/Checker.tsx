@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { parseInput } from "@/lib/redos/analyze";
 import { useAnalysis } from "@/lib/redos/client";
+import { parseInput } from "@/lib/redos/format";
 import { FindingCard } from "./FindingCard";
 import { PatternView } from "./PatternView";
 
@@ -31,6 +31,12 @@ const VERDICT = {
     title: "Vulnerable: polynomial backtracking",
     body: "Match time grows super-linearly with input length. Dangerous on unbounded input, so cap the length or rewrite.",
   },
+  possible: {
+    icon: "◇",
+    color: "var(--warning)",
+    title: "Possible ReDoS, not confirmed",
+    body: "A risky loop was found, but the generated input couldn't reach it. Check whether a real input could.",
+  },
   safe: {
     icon: "●",
     color: "var(--good)",
@@ -47,15 +53,27 @@ export function Checker() {
   const state = useAnalysis(source, flags);
 
   const onPattern = (value: string) => {
-    const lit = parseInput(value);
-    if (lit) {
-      setSource(lit.source);
-      setFlags(lit.flags);
-    } else setSource(value);
+    setSource(value);
     setSelected(0);
   };
 
-  const result = state.status === "done" ? state.result : null;
+  // Pasting over the whole field accepts a /pattern/flags literal. Typing never
+  // does, so a pattern that really starts and ends with a slash stays intact.
+  const onPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const el = e.currentTarget;
+    const lit = parseInput(e.clipboardData.getData("text"));
+    if (!lit || el.selectionStart !== 0 || el.selectionEnd !== el.value.length) return;
+    e.preventDefault();
+    setSource(lit.source);
+    setFlags(lit.flags);
+    setSelected(0);
+  };
+
+  // Ignore a result for text that has since changed: its spans no longer line up.
+  const result =
+    state.status === "done" && state.result.source === source && state.result.flags === flags
+      ? state.result
+      : null;
   const findings = result?.findings ?? [];
   const v = result ? VERDICT[result.verdict] : null;
 
@@ -71,6 +89,7 @@ export function Checker() {
             id="pattern"
             value={source}
             onChange={(e) => onPattern(e.target.value)}
+            onPaste={onPaste}
             spellCheck={false}
             autoComplete="off"
             placeholder="paste a pattern or /pattern/flags"
@@ -80,7 +99,10 @@ export function Checker() {
           <input
             aria-label="Flags"
             value={flags}
-            onChange={(e) => setFlags(e.target.value.replace(/[^dgimsuvy]/g, ""))}
+            onChange={(e) => {
+              setFlags(e.target.value.replace(/[^dgimsuvy]/g, ""));
+              setSelected(0);
+            }}
             spellCheck={false}
             placeholder="flags"
             className="w-16 bg-transparent py-3 pr-3 pl-1 outline-none"
@@ -107,6 +129,13 @@ export function Checker() {
         <Banner icon="▲" color="var(--critical)" title="Analysis timed out">
           The analyzer&apos;s worker was killed after 2 s. That almost always means the pattern
           backtracks catastrophically even on tiny inputs.
+        </Banner>
+      )}
+
+      {state.status === "error" && (
+        <Banner icon="■" color="var(--text-3)" title="Analysis failed">
+          The checker hit an internal error, so this says nothing about your pattern:{" "}
+          {state.message}
         </Banner>
       )}
 

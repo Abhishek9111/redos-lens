@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Finding } from "@/lib/redos/analyze";
 import { describeGrowth, runTiming, type Sample } from "@/lib/redos/client";
+import { sup } from "@/lib/redos/format";
 import { TimingChart } from "./TimingChart";
 
 export function FindingCard({
@@ -20,6 +21,7 @@ export function FindingCard({
 }) {
   const [samples, setSamples] = useState<Sample[]>([]);
   const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
 
@@ -28,19 +30,23 @@ export function FindingCard({
   const measure = () => {
     cancelRef.current?.();
     setSamples([]);
+    setError(null);
     setRunning(true);
     cancelRef.current = runTiming(
       source,
       flags,
       f,
       (s) => setSamples((prev) => [...prev, s]),
-      () => setRunning(false),
+      (message) => {
+        setRunning(false);
+        if (message) setError(message);
+      },
     );
   };
 
   const n = f.severity === "exponential" ? 30 : 50_000;
   const snippet =
-    `/${source}/${flags.replace("g", "")}.test(` +
+    `/${new RegExp(source).source}/${flags.replace("g", "")}.test(` +
     [JSON.stringify(f.prefix), `${JSON.stringify(f.pump)}.repeat(${n})`, JSON.stringify(f.suffix)]
       .filter((p) => p !== '""')
       .join(" + ") +
@@ -77,8 +83,11 @@ export function FindingCard({
           {badge.label}
         </span>
         <h3 className="font-medium">{f.title}</h3>
-        {!f.exploitable && (
+        {f.blocked === "always-matches" && (
           <span className="text-xs text-ink-3">not exploitable: the match always succeeds</span>
+        )}
+        {f.blocked === "unreached" && (
+          <span className="text-xs text-ink-3">unconfirmed: no generated input reached this loop</span>
         )}
       </header>
 
@@ -86,37 +95,43 @@ export function FindingCard({
         <Inline text={f.detail} />
       </p>
 
-      <div className="mt-3 rounded-lg bg-surface-2 p-3">
-        <div className="mb-1 text-xs text-ink-3">Attack input</div>
-        <code className="block break-all font-mono text-[13px]">
-          {f.prefix && <span>{JSON.stringify(f.prefix)} + </span>}
-          <span className="text-critical">{JSON.stringify(f.pump)}</span>
-          <span className="text-ink-3"> × n</span>
-          {f.suffix && <span> + {JSON.stringify(f.suffix)}</span>}
-        </code>
-      </div>
+      {f.exploitable && (
+        <>
+        <div className="mt-3 rounded-lg bg-surface-2 p-3">
+          <div className="mb-1 text-xs text-ink-3">Attack input</div>
+          <code className="block break-all font-mono text-[13px]">
+            {f.prefix && <span>{JSON.stringify(f.prefix)} + </span>}
+            <span className="text-critical">{JSON.stringify(f.pump)}</span>
+            <span className="text-ink-3"> × n</span>
+            {f.suffix && <span> + {JSON.stringify(f.suffix)}</span>}
+          </code>
+        </div>
 
-      <div className="mt-3 flex flex-wrap gap-2">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            measure();
-          }}
-          disabled={running}
-          className="rounded-lg bg-ink px-3 py-1.5 text-sm font-medium text-bg disabled:opacity-60"
-        >
-          {running ? "Measuring…" : samples.length ? "Measure again" : "Measure in sandbox"}
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            copy();
-          }}
-          className="rounded-lg border border-line px-3 py-1.5 text-sm text-ink-2 hover:text-ink"
-        >
-          {copied ? "Copied" : "Copy repro"}
-        </button>
-      </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              measure();
+            }}
+            disabled={running}
+            className="rounded-lg bg-ink px-3 py-1.5 text-sm font-medium text-bg disabled:opacity-60"
+          >
+            {running ? "Measuring…" : samples.length ? "Measure again" : "Measure in sandbox"}
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              copy();
+            }}
+            className="rounded-lg border border-line px-3 py-1.5 text-sm text-ink-2 hover:text-ink"
+          >
+            {copied ? "Copied" : "Copy repro"}
+          </button>
+        </div>
+        </>
+      )}
+
+      {error && <p className="mt-3 text-sm text-critical">Timing failed: {error}</p>}
 
       {samples.length > 0 && (
         <div className="mt-4">
@@ -150,8 +165,4 @@ function Inline({ text }: { text: string }) {
       )}
     </>
   );
-}
-
-function sup(n: number) {
-  return String(n).replace(/\d/g, (d) => "⁰¹²³⁴⁵⁶⁷⁸⁹"[Number(d)]);
 }
