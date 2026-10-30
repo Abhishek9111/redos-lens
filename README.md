@@ -1,5 +1,7 @@
 # redos-lens
 
+**Live app: https://redos-lens.vercel.app/**
+
 Finds regular expressions that can be forced into catastrophic backtracking (ReDoS), then proves it by timing them in a sandboxed Web Worker. Everything runs in the browser, so your patterns never leave your machine.
 
 ![redos-lens flagging the classic email regex as exponential](docs/screenshot.jpg)
