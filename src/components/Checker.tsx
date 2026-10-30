@@ -9,12 +9,10 @@ import { PatternView } from "./PatternView";
 const EXAMPLES: { label: string; source: string; flags?: string }[] = [
   { label: "Nested quantifier", source: "^(a+)+$" },
   { label: "Word list", source: "^(\\w+\\s?)*$" },
-  { label: "Trailing whitespace", source: "\\s+$" },
   {
     label: "Classic email",
     source: "^([a-zA-Z0-9_\\.\\-])+\\@(([a-zA-Z0-9\\-])+\\.)+([a-zA-Z0-9]{2,4})+$",
   },
-  { label: "Overlapping classes", source: "^(\\d|\\w)+$" },
   { label: "Safe slug", source: "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
 ];
 
@@ -108,7 +106,8 @@ export function Checker() {
             className="w-16 bg-transparent py-3 pr-3 pl-1 outline-none"
           />
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-ink-3">Try an example:</span>
           {EXAMPLES.map((ex) => (
             <button
               key={ex.label}
