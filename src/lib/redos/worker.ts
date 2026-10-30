@@ -18,14 +18,13 @@ export type WorkerResponse =
   | { id: number; kind: "analysis"; result: Analysis }
   | { id: number; kind: "start"; n: number; length: number }
   | { id: number; kind: "sample"; n: number; length: number; ms: number }
-  | { id: number; kind: "done" };
+  | { id: number; kind: "done" }
+  | { id: number; kind: "error"; message: string };
 
 const post = (m: WorkerResponse) =>
   (self as unknown as { postMessage(m: WorkerResponse): void }).postMessage(m);
 
-self.onmessage = (e: MessageEvent<WorkerRequest>) => {
-  const m = e.data;
-
+function handle(m: WorkerRequest) {
   if (m.kind === "analyze") {
     post({ id: m.id, kind: "analysis", result: analyze(m.source, m.flags) });
     return;
@@ -44,4 +43,12 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     if (ms > m.budgetMs) break;
   }
   post({ id: m.id, kind: "done" });
+}
+
+self.onmessage = (e: MessageEvent<WorkerRequest>) => {
+  try {
+    handle(e.data);
+  } catch (err) {
+    post({ id: e.data.id, kind: "error", message: (err as Error).message });
+  }
 };
