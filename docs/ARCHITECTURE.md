@@ -31,7 +31,7 @@ Nothing is sent to a server. Next.js only serves the page; all the work happens 
 | **Attack string** | `prefix + pump × n + suffix` |
 | **Exponential** | Time doubles (roughly) per extra pump. About 30 characters can hang a server. |
 | **Polynomial O(nᵏ)** | Time grows as length² or length³. You need large inputs (10 KB to 1 MB), but it is still dangerous on unbounded input. |
-| **Exploitable** | The checker found a suffix that makes the match fail, so the backtracking actually happens. |
+| **Exploitable** | The generated input reaches the loop, and a suffix then makes the match fail, so the backtracking actually happens. |
 
 ---
 
@@ -83,6 +83,7 @@ src/
 │
 └── lib/redos/              Logic, no React (except client.ts hooks)
     ├── analyze.ts          ★ The static analyzer: pure function analyze(source, flags)
+    ├── format.ts           Small shared helpers, including /pattern/flags parsing
     ├── worker.ts           Worker entry: handles "analyze" and "time" messages
     └── client.ts           Main-thread side: spawns workers, watchdogs, growth math
 ```
@@ -98,7 +99,7 @@ src/
 
 ```
 keystroke
-  → Checker: setSource()  (if you paste "/abc/gi" it is split into pattern + flags)
+  → Checker: setSource()  (pasting "/abc/gi" over the whole field splits it into pattern + flags)
   → useAnalysis(source, flags)
        ├ wait 150 ms (debounce: no work while you are typing)
        ├ start a 2 s watchdog timer
@@ -152,6 +153,8 @@ Proving a regex unsafe usually means building an NFA (a state-machine graph) and
 
 For example, to ask "can the loop body `(a+)` match `"aa"`?", it compiles `/^(?:a+)$/` and calls `.test("aa")`. That runs in microseconds and is exact, because the engine applies all of its own rules for escapes, classes, flags and Unicode.
 
+To ask "can two iterations cover the same text?", it runs the body twice side by side in one regex. Because both copies run in the same string, `\b` and lookarounds see their real neighbours.
+
 ### 6.2 Pipeline
 
 ```
@@ -169,12 +172,13 @@ analyze(source, flags)
   ├─ 5. Polynomial check, once per alternative  → Finding | null
   │       (skipped if an exponential finding already covers those loops)
   ├─ 6. Sort: exploitable first, then exponential > O(n³) > O(n²)
-  └─ 7. Verdict = worst *exploitable* finding, else "safe"
+  └─ 7. Verdict = worst *exploitable* finding, else "possible" if a loop
+          couldn't be reached, else "safe"
 ```
 
 ### 6.3 Probe alphabet and representatives
 
-You can't test every Unicode character, so the analyzer works with a **probe alphabet** of about 140 characters: a–z, A–Z, 0–9, ASCII punctuation, control characters and a few non-ASCII ones (é, €, 中, non-breaking space, …).
+You can't test every Unicode character, so the analyzer works with a **probe alphabet**: a–z, A–Z, 0–9, ASCII punctuation and control characters, every character the pattern itself mentions, and an evenly spaced sample of other scripts so that classes like `\p{Script=Cyrillic}` have something to match.
 
 Most of those characters behave identically for a given regex. In `^[a-z]+@\d+$`, the characters `b` and `q` are interchangeable. So each probe char gets a **signature**: which leaf nodes match it.
 
@@ -193,15 +197,16 @@ One character per signature is kept as a **representative**. Typical regexes hav
 
 Two rules. Each one has a known exploit shape.
 
-**Rule A: nested quantifier.** Loop body `B` matches both `w` and `ww`.
+**Rule A: one iteration or two.** Loop body `B` can match a string `t` in one iteration, and can also split `t` across two non-empty iterations.
 
 ```
-(a+)+   B = a+   B matches "a" ✓ and "aa" ✓   → vulnerable
+(a+)+        t = "aa"   one: [aa]    two: [a][a]    → vulnerable
+(a|b|ab)*    t = "ab"   one: [ab]    two: [a][b]    → vulnerable
 ```
 
-Why: `"aaaa"` can be split as `[a][a][a][a]`, `[aa][a][a]`, `[aaaa]`, … with exponentially many splits, and the engine tries every one before giving up.
+Why: every copy of `t` in the input gives the engine a two-way choice, so n copies give 2ⁿ paths, and it tries every one before giving up.
 
-**Rule B: overlapping alternation.** Two alternatives inside `B` both match the same `w`.
+**Rule B: overlapping alternation.** Two alternatives inside `B` both match the same `t`.
 
 ```
 (\d|\w)+   "0" matches \d ✓ and \w ✓          → vulnerable
@@ -209,11 +214,12 @@ Why: `"aaaa"` can be split as `[a][a][a][a]`, `[aa][a][a]`, `[aaaa]`, … with e
 
 Why: each character has two choices, so n characters give 2ⁿ paths.
 
-**The search:** try every `w` among the representatives the body can consume, each one alone and each pair (`w` up to 2 chars). The first hit returns a finding with `pump = w`.
+**The search:** try short strings, shortest first: single characters, pairs, a limited set of triples, doubled pairs, and text sampled from the body itself (so `((abc)+)+` tries `"abcabc"` and `(foo|bar|foobar)*` tries `"foobar"`). If a candidate is unexploitable, the search keeps going and only falls back to it when nothing better turns up.
 
 Counter-examples (correctly not flagged):
-- `(a+b)*`: body needs a `b`, so it can't match `"a"`
+- `(a+b)*`: body needs a `b`, so `"aa"` isn't a match
 - `(ab)*`: body matches `"ab"` but not `"abab"`
+- `(\b\w+\b\s*)*`: `"aa"` can't be split, because `\b` fails between two letters
 
 ### 6.5 Polynomial check (per alternative)
 
@@ -230,21 +236,25 @@ Counter-examples (correctly not flagged):
 \s+$         implicit loop + \s+ both eat " "       → O(n²)
 ```
 
-**How the chain is built:** for each representative c, walk the flattened elements left to right:
+**How the chain is built:** the alternative is first opened up into **paths**, one for each route through its groups and optional groups (`(a+)?a+` becomes `a+ a+` and `a+`, capped at 64). Then for each path and each representative c, walk the elements left to right:
 - a loop that matches c → extend the chain
 - an optional element, or one that matches c → keep the chain going
 - anything else → break the chain, start over
 
 The longest chain over all c gives k (the degree).
 
-*Flattening:* `(\d+)\d+` is treated like `\d+\d+`. A group with a single alternative is inlined so it doesn't hide an adjacency.
+*Why paths:* a loop inside a group is still next to whatever follows the group. Without paths, `(?:\s+|x)$` and `(a+)?a+` would look safe. The implicit loop follows the same paths, and it's skipped when every route starts with `^`, as in `(^a+)+$`.
 
-### 6.6 Exploitability (forcing failure)
+### 6.6 Exploitability (reaching the loop, then forcing failure)
 
-A finding is only real if the overall match can be made to **fail**. `failingSuffix(prefix, pump, 4)` tries suffixes in this order: characters that are *not* in the pump (most likely to break the match), then the empty string, then the rest. It returns the first one where `fullRegex.test(prefix + pump×4 + suffix)` is false.
+A finding is only real if two things hold, checked in `finish()`:
+
+1. **The input reaches the loop.** `reaches()` cuts the pattern off right after the loop, adds `$`, closes any open groups, and tests `prefix + pump × 4` against it. A failure here is recorded as `blocked: "unreached"`, and the verdict becomes **possible** rather than safe, because the generated input may simply be too naive. The check is skipped for loops inside lookarounds, where cutting would change the meaning.
+2. **The overall match can fail.** `failingSuffix(prefix, pump, 4)` tries suffixes in this order: characters that are *not* in the pump (most likely to break the match), then the empty string, then the rest. It returns the first one where `fullRegex.test(prefix + pump×4 + suffix)` is false. If none works, the finding is recorded as `blocked: "always-matches"`.
 
 - `(a+)+$` with suffix `"b"` → the match fails → **exploitable**
 - `(a+)+` with no `$` → it matches `"aaaa"` immediately whatever follows → **not exploitable** (still shown, greyed out)
+- `^(?!a)(a+)+$` → the lookahead rejects the pump before the loop → **possible**
 
 **Why n = 4 and not 40:** this runs on a regex already suspected of being catastrophic. An earlier version used 40, and `(a+)+$` on 40 characters is about 2⁴⁰ steps, so the analyzer hung itself. Whether a suffix makes the match fail almost never depends on n.
 
@@ -253,13 +263,16 @@ A finding is only real if the overall match can be made to **fail**. `failingSuf
 | Helper | What it answers |
 |---|---|
 | `compile(body)` | `/^(?:body)$/` with only the flags that matter (`i s u v`), cached. Returns `null` if the fragment can't stand alone. |
-| `matches(node, s)` | "Does this node, on its own, match exactly `s`?" Uses the real engine, or falls back to a character-set check for nodes with backreferences. |
+| `matches(node, s)` | "Does this node, on its own, match exactly `s`?" Uses the real engine. Nodes with backreferences answer no, because group numbers change when compiled alone. |
+| `splits(node, s)` | "Can two non-empty iterations of this node cover exactly `s`?" |
+| `reaches(loop, input)` | "Does this input get through the pattern as far as the end of the loop?" (see 6.6) |
+| `anchored(node)` | "Must a match starting here begin at `^`?" |
 | `chars(node)` | Every probe character this node could consume anywhere. Cached. |
 | `nullable(node)` | Can this node match the empty string? (e.g. `a?`, `a*`, lookarounds) |
 | `sample(node)` | A cheap example match, used to build prefixes. |
 | `prefixFor(node)` | Walks up via `.parent` and concatenates samples of everything before the node, giving text that reaches the loop. |
 | `bodyAlternatives(B)` | The `|` branches of a loop body, unwrapping `((a|b))` → `[a, b]`. |
-| `flatten(elements)` | Inlines single-alternative groups (see 6.5). |
+| `paths(elements)` | Every route through groups and optional groups (see 6.5). |
 | `representatives()` | One char per signature (see 6.3). |
 
 ### 6.8 Output shape
@@ -267,7 +280,7 @@ A finding is only real if the overall match can be made to **fail**. `failingSuf
 ```ts
 Analysis {
   source, flags
-  verdict: "safe" | "polynomial" | "exponential" | "invalid"
+  verdict: "safe" | "possible" | "polynomial" | "exponential" | "invalid"
   error?:  string               // only when invalid
   findings: Finding[]
   notes:    string[]            // caveats, e.g. "uses backreferences"
@@ -281,6 +294,7 @@ Finding {
   spans:    { start, end }[]    // [0] = the loop, rest = the overlapping parts
   prefix, pump, suffix          // the attack recipe
   exploitable: boolean
+  blocked?: "always-matches" | "unreached"   // why it isn't exploitable
 }
 ```
 
@@ -300,6 +314,7 @@ One worker file serves both jobs, and the `kind` field picks which.
 | ← worker | `start` | `n, length` | About to run this size (arm the kill timer) |
 | ← worker | `sample` | `n, length, ms` | Finished this size |
 | ← worker | `done` | – | All sizes done, or the budget was exceeded |
+| ← worker | `error` | `message` | The job threw. Shown as a tool failure, never as a verdict on the pattern |
 
 Every message carries an `id` so stale replies can be dropped.
 
@@ -311,7 +326,7 @@ The worker is created with `new Worker(new URL("./worker.ts", import.meta.url), 
 
 | Export | Role |
 |---|---|
-| `useAnalysis(source, flags)` | React hook. Debounces (150 ms), owns the long-lived analysis worker, arms the 2 s watchdog, respawns the worker after a kill. Returns `idle / running / done / timeout`. |
+| `useAnalysis(source, flags)` | React hook. Debounces (150 ms), owns the long-lived analysis worker, arms the watchdog (2 s, or 10 s while a new worker starts up), respawns the worker after a kill. Returns `idle / running / done / timeout / error`. |
 | `runTiming(...)` | Spawns a timing worker and wires up the start/sample/done handshake and the 3 s kill switch (`KILL_MS`). Returns a cancel function, which `FindingCard` calls on unmount or re-run. |
 | `sizesFor(finding)` | The input-size schedule (see 5b). |
 | `describeGrowth(finding, samples, running)` | Turns raw timings into a verdict sentence (below). |
@@ -319,20 +334,22 @@ The worker is created with `new Worker(new URL("./worker.ts", import.meta.url), 
 
 ### Growth math
 
-It uses the last two samples that took at least 1 ms (`a`, `b`).
+It fits a straight line (least squares) through the last four samples that took at least 1 ms, because one noisy timing can swing a two-point estimate a lot.
 
-- **Exponential:** factor per pump = `(b.ms / a.ms) ^ (1 / (b.n − a.n))`. It extrapolates how many characters it takes to reach 10 s.
-- **Polynomial:** the exponent is `k = log(b.ms / a.ms) / log(b.len / a.len)`, the slope on a log-log plot. It extrapolates the time for 100 KB and 1 MB inputs.
+- **Exponential:** the slope of `log(ms)` against the pump count gives the factor per pump. It extrapolates how many characters it takes to reach 10 s.
+- **Polynomial:** the slope of `log(ms)` against `log(length)` gives the exponent k. It extrapolates the time for 100 KB and 1 MB inputs.
 
 ### Confirmed vs not reproduced
 
-Measured results can disagree with the static analysis, because engines optimize some patterns. In testing, `\s+$` was clearly O(n²) in Node, but linear in the newer Chromium V8 used by the browser pane.
+Measured results can disagree with the static analysis. In testing, `\s+$` was clearly O(n²) in Node, but looked linear in the Chromium used by the browser pane. The cause of that difference hasn't been established.
 
 So `describeGrowth` returns `{ confirmed, text }`:
 - **confirmed:** the worker was killed, or the growth factor is above 1.15× per pump, or k ≥ 1.4.
-- **not reproduced:** the UI says this browser's engine handled it, but the static finding still applies to other backtracking engines.
+- **not reproduced:** the UI says no slowdown appeared here, which means either a false alarm or an engine that handles the pattern better, and tells the reader to test in the engine they deploy on.
 
-The static result answers "is the regex dangerous?" and the dynamic result answers "is it dangerous in this browser's engine right now?". The UI shows both and never lets one silently override the other.
+A killed run always counts as confirmed, whatever the earlier timings looked like. Findings that aren't exploitable have no Measure button.
+
+The static result answers "does this regex look dangerous?" and the dynamic result answers "did it actually slow down in this browser?". The UI shows both and never lets one silently override the other.
 
 ---
 
@@ -361,9 +378,9 @@ page.tsx (server)
 |---|---|---|
 | All regex execution in workers | A hung regex can't freeze the UI, and `terminate()` is a hard kill | Some message-passing boilerplate |
 | Long-lived analysis worker, fresh timing worker | Analysis runs on every keystroke, so reuse it. Timing is expected to be killed, so make it disposable | – |
-| Real engine on tiny strings instead of a hand-built NFA | Exact semantics for escapes, classes, flags and Unicode for free, with a small amount of code | It's a search over likely witnesses, not a proof, so a rare ambiguity needing a 3+ char pump can be missed |
+| Real engine on tiny strings instead of a hand-built NFA | Exact semantics for escapes, classes, flags and Unicode for free, with a small amount of code | It's a search over likely witnesses, not a proof, so a "safe" verdict can still be wrong |
 | Probe alphabet + representatives | Keeps the search to tens of candidates instead of thousands | Exotic Unicode classes are sampled, not fully covered |
-| Requiring a failing suffix | Removes a whole class of false positives (`(a+)+` without `$`) | – |
+| Requiring the loop to be reached and a failing suffix | Removes whole classes of false positives (`(a+)+` without `$`, unreachable loops) | Naive prefixes can leave a real issue at "possible" |
 | Static + dynamic, reported separately | Engines differ; the static result covers other engines, the timing covers this one | The user sees two signals and must read both |
 | No server | Patterns can be sensitive (internal validators); nothing leaves the browser | – |
 
@@ -371,9 +388,10 @@ page.tsx (server)
 
 ## 11. Known limitations
 
-- **Backreferences** (`\1`) aren't regular, so loops containing them are approximated with character sets. This is flagged in `notes`.
-- **Lookarounds** count as nullable. A generated prefix may not satisfy a lookahead, so a real issue can show as "not exploitable".
-- **Pump length ≤ 2.** Ambiguity that needs a 3+ character pump (rare) is missed. Raising this costs `reps³` regex tests.
+- **Backreferences** (`\1`) aren't regular, so loops containing them are skipped, and the result says so in `notes`.
+- **Lookarounds** count as nullable, and a loop inside one isn't checked for reachability.
+- **The pump search is a sample, not exhaustive.** It covers single characters, pairs, some triples and text taken from the body. A very long pump the body can't suggest can be missed, and so can bounded cases like `(a{3,5})+`, where the ambiguity is between two different two-iteration splits.
+- **Unusual characters are sampled.** A class that matches only characters outside the pattern's own text and the sampled ranges has nothing to probe with.
 - **Prefix generation is naive:** first alternative, minimum repetitions. It can produce a prefix that doesn't reach the loop in complex patterns.
 - **Loops are `max ≥ 10`.** `(a+){2,5}` isn't treated as an outer loop. It is bounded, but can still be slow in the worst case.
 - **The timing result is engine-specific.** It shows the current browser's engine only.
@@ -385,9 +403,9 @@ page.tsx (server)
 | You want to… | Edit |
 |---|---|
 | Add a new detection rule | Add a `checkX()` method on `Context` in `analyze.ts`, call it in `analyze()`, and add a value to `Finding.rule` |
-| Search longer pumps | `candidates()` in `analyze.ts` |
+| Change which pumps are tried | `candidates()` in `analyze.ts` |
 | Treat smaller bounded quantifiers as loops | `LOOP_THRESHOLD` in `analyze.ts` |
-| Change the kill timeout or timing sizes | `KILL_MS`, `sizesFor()` in `client.ts`; `budgetMs` in `runTiming()` |
+| Change the kill or startup timeouts, or timing sizes | `KILL_MS`, `STARTUP_MS`, `sizesFor()` in `client.ts`; `budgetMs` in `runTiming()` |
 | Change the "confirmed" thresholds | `describeGrowth()` in `client.ts` |
 | Add example patterns | `EXAMPLES` in `Checker.tsx` |
 | Retheme | Tokens in `globals.css` |
@@ -401,7 +419,13 @@ npm install
 npm run dev -- -p 3001
 ```
 
-The analyzer is plain TypeScript with no DOM, so you can exercise it directly:
+Run the tests with:
+
+```bash
+npm test
+```
+
+The analyzer is plain TypeScript with no DOM, so you can also exercise it directly:
 
 ```bash
 npx tsx -e 'import {analyze} from "./src/lib/redos/analyze"; console.log(analyze("^(a+)+$","").findings)'

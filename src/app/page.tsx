@@ -14,7 +14,8 @@ export default function Home() {
       <footer className="mt-16 border-t border-line pt-6 text-xs leading-relaxed text-ink-3">
         Results apply to backtracking engines (JavaScript&apos;s V8, PCRE, Java, Python{" "}
         <code>re</code>). Linear-time engines such as RE2 and Rust&apos;s <code>regex</code> are
-        immune. Backreferences and lookarounds are approximated.
+        immune. A clean result isn&apos;t a proof of safety: loops with backreferences are skipped
+        and lookarounds are approximated.
       </footer>
     </main>
   );
